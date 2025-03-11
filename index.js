@@ -49,9 +49,6 @@ async function getEmbedding(text) {
       inputs: text,
     });
 
-    // console.log("Respuesta completa de Hugging Face:", result);
-
-    // Verificamos que sea un array (el embedding unidimensional)
     if (!Array.isArray(result)) {
       throw new Error("La respuesta de Hugging Face no es el embedding esperado.");
     }
@@ -83,7 +80,7 @@ async function getTitleFromURL(url) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
-// ENDPOINT: INDEXAR (GUARDAR) NOTICIA + COPY EN PINECONE
+// ENDPOINT: INDEXAR (GUARDAR) NOTICIA + COPY EN PINECONE (COPY DE FACEBOOK)
 // ────────────────────────────────────────────────────────────────────────────────
 app.post("/indexar", async (req, res) => {
   try {
@@ -96,17 +93,16 @@ app.post("/indexar", async (req, res) => {
     const vector = await getEmbedding(noticia);
 
     // 2) Subir a Pinecone
-    const upsertResponse = await index.upsert(
-      [
-        {
-          id: Date.now().toString(), // ID único
-          values: vector,
-          metadata: { noticia, copy },
-        },
-      ]
-    );
+    await index.upsert([
+      {
+        id: Date.now().toString(), // ID único
+        values: vector,
+        // Guardamos la noticia + copy. Este copy se asume que es de Facebook
+        // (Así lo reutilizamos en el RAG)
+        metadata: { noticia, copy },
+      },
+    ]);
 
-    // console.log("Indexación exitosa:", upsertResponse);
     return res.json({ message: "Noticia indexada exitosamente." });
   } catch (error) {
     console.error("Error al indexar la noticia:", error);
@@ -115,7 +111,93 @@ app.post("/indexar", async (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────────
-// ENDPOINT: GENERAR COPIES
+// NUEVO ENDPOINT: GENERAR COPY USANDO RAG
+// ────────────────────────────────────────────────────────────────────────────────
+app.post("/generar_copy_rag", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: "La URL es obligatoria." });
+    }
+
+    // 1) Scraping: obtener título de la noticia
+    const titulo = await getTitleFromURL(url);
+
+    // 2) Generar embedding del título
+    const vector = await getEmbedding(titulo);
+
+    // 3) Buscar topK=3 en Pinecone para obtener los 3 copies de FB más similares
+    const results = await index.namespace("").query({
+      topK: 3,
+      vector,
+      includeMetadata: true,
+    });
+
+    const similares = results.matches?.map((match) => ({
+      noticia: match.metadata?.noticia || "",
+      copy: match.metadata?.copy || "", // copy de Facebook
+    })) || [];
+
+    // 4) Construir references para Facebook
+    let referencesFb = "";
+    if (similares.length > 0) {
+      referencesFb = `Aquí hay algunos copies de Facebook anteriores (3 más similares):\n`;
+      referencesFb += similares
+        .map((s, i) => `Ejemplo ${i + 1}: \n  Título: "${s.noticia}"\n  FB Copy: "${s.copy}"`)
+        .join("\n\n");
+    }
+
+    // 5) Prompt para Facebook con RAG
+    const fbPrompt = `
+      Basándote en estos copies de Facebook (ejemplos), crea un copy de Facebook
+      para la siguiente noticia. El copy debe ser breve, informativo y puedes usar
+      1-2 emojis si es adecuado. Máximo 2 líneas.
+
+      ${referencesFb}
+
+      Título de la noticia actual: "${titulo}"
+    `;
+
+    // 6) Prompt para Twitter y Wpp (sin RAG, puro prompt)
+    const twitterPrompt = `
+      Genera un tweet breve (máx. 10 palabras) para esta noticia, 
+      con tono directo y un emoji al final.
+      Noticia: "${titulo}"
+    `;
+
+    const wppPrompt = `
+      Genera un mensaje corto para WhatsApp con TÍTULO (máx. 10 palabras) y 
+      un párrafo breve. Usa 1-2 emojis si es apropiado.
+      Noticia: "${titulo}"
+    `;
+
+    // 7) Llamamos a Gemini
+    const [fbResp, twResp, wppResp] = await Promise.all([
+      model.generateContent([fbPrompt]),
+      model.generateContent([twitterPrompt]),
+      model.generateContent([wppPrompt]),
+    ]);
+
+    const extractText = (response) =>
+      response.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+
+    const facebookCopy = extractText(fbResp).trim();
+    const twitterCopy = extractText(twResp).trim();
+    const wppCopy = extractText(wppResp).trim();
+
+    return res.json({
+      facebook: facebookCopy,
+      twitter: twitterCopy,
+      wpp: wppCopy
+    });
+  } catch (error) {
+    console.error("Error al generar copy (RAG):", error);
+    res.status(500).json({ error: "Hubo un error al generar el copy con RAG." });
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENDPOINT VIEJO (Opcional): /generar_copy - si ya no lo usas, puedes borrarlo
 // ────────────────────────────────────────────────────────────────────────────────
 app.post("/generar_copy", async (req, res) => {
   try {
@@ -123,86 +205,17 @@ app.post("/generar_copy", async (req, res) => {
     if (!url) {
       return res.status(400).json({ error: "La URL es obligatoria." });
     }
-
-    // 1️⃣ Obtener el título de la noticia
-    const noticia = await getTitleFromURL(url);
-
-    // 2️⃣ Generar embeddings del título para buscar noticias similares
-    const vector = await getEmbedding(noticia);
-
-    // 3️⃣ Buscar noticias similares en Pinecone
-    const resultados = await index.namespace("").query({
-      topK: 2,
-      vector,
-      includeMetadata: true,
-    });
-
-    // 4️⃣ Extraer los metadatos de noticias similares
-    const similares = resultados.matches?.map((match) => ({
-      noticia: match.metadata?.noticia || "",
-      copy: match.metadata?.copy || "",
-    })) || [];
-
-    let referenciaTexto = "";
-    if (similares.length > 0) {
-      referenciaTexto = `Aquí hay algunos ejemplos de noticias anteriores con sus copies:\n` +
-        similares
-          .map(
-            (s, i) => `Ejemplo ${i + 1}:\n   Título: "${s.noticia}"\n   Copy: "${s.copy}"`
-          )
-          .join("\n");
-    }
-
-    // 5️⃣ Crear los prompts para cada copy
-    const fbPrompt = `
-      Genera un título llamativo para esta noticia. 
-      Debe ser informativo, breve (máx. 10 palabras) y con 1-2 emojis si es adecuado.
-      ${referenciaTexto}
-      Noticia: "${noticia}"
-    `;
-
-    const twitterPrompt = `
-      Genera un título breve (máx. 10 palabras) para esta noticia, 
-      con tono directo y un emoji al final.
-      ${referenciaTexto}
-      Noticia: "${noticia}"
-    `;
-
-    const wppPrompt = `
-      Genera un copy corto con TÍTULO (máx. 10 palabras) y un párrafo breve. 
-      Usa 1-2 emojis si es apropiado.
-      ${referenciaTexto}
-      Noticia: "${noticia}"
-    `;
-
-    // 6️⃣ Llamadas a la API de Gemini en paralelo
-    const [fbCopy, twitterCopy, wppCopy] = await Promise.all([
-      model.generateContent([fbPrompt]),
-      model.generateContent([twitterPrompt]),
-      model.generateContent([wppPrompt]),
-    ]);
-
-    // 7️⃣ Obtener el texto generado (Gemini retorna un objeto con candidates)
-    const extractText = (response) =>
-      response.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
-
-    const fbText = extractText(fbCopy);
-    const twitterText = extractText(twitterCopy);
-    const wppText = extractText(wppCopy);
-
-    // 8️⃣ Enviamos como respuesta los tres copies
-    res.json({
-      facebook: fbText.trim(),
-      twitter: twitterText.trim(),
-      wpp: wppText.trim(),
-    });
+    // ... Lógica anterior ...
+    return res.json({ /* ... facebook, twitter, wpp ... */ });
   } catch (error) {
-    console.error("Error al generar los copys:", error);
-    res.status(500).json({ error: "Hubo un error al generar los copys." });
+    console.error(error);
+    res.status(500).json({ error: "Error" });
   }
 });
 
-// NUEVO ENDPOINT: BÚSQUEDA DE LA NOTICIA/COPY MÁS SIMILAR
+// ────────────────────────────────────────────────────────────────────────────────
+// ENDPOINT: BÚSQUEDA SIMILAR (opcional, para pruebas o debug)
+// ────────────────────────────────────────────────────────────────────────────────
 app.post("/buscar_similar", async (req, res) => {
   try {
     const { texto } = req.body;
@@ -210,28 +223,22 @@ app.post("/buscar_similar", async (req, res) => {
       return res.status(400).json({ error: "Se requiere un campo 'texto' para buscar similitud." });
     }
 
-    // 1) Generar embedding de la consulta
     const vector = await getEmbedding(texto);
-
-    // 2) Consultar Pinecone
     const results = await index.namespace("").query({
-      topK: 1,              // solo queremos el más parecido
-      vector,               // embedding de la consulta
-      includeMetadata: true // para obtener la noticia y el copy del match
+      topK: 1,
+      vector,
+      includeMetadata: true
     });
 
-    // 3) Verificar si hay resultados
     if (!results.matches || results.matches.length === 0) {
       return res.status(404).json({ error: "No se encontraron coincidencias similares." });
     }
 
-    // 4) Tomar el primer resultado (más parecido)
     const bestMatch = results.matches[0];
-    // Podrías devolver score, ID y metadata
     return res.json({
       id: bestMatch.id,
-      score: bestMatch.score,         // similitud o distancia, depende de la configuración de tu índice
-      metadata: bestMatch.metadata    // { noticia, copy }
+      score: bestMatch.score,
+      metadata: bestMatch.metadata
     });
   } catch (error) {
     console.error("Error al buscar similar:", error);
@@ -243,4 +250,6 @@ app.post("/buscar_similar", async (req, res) => {
 // INICIAR SERVIDOR
 // ────────────────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT);
+app.listen(PORT, () => {
+  console.log(`Backend corriendo en puerto ${PORT}`);
+});
