@@ -1,12 +1,10 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");  // Puedes seguir usando fetch para scraping o cambiarlo a axios
+const fetch = require("node-fetch"); // Usado para scraping
 const { Pinecone } = require("@pinecone-database/pinecone");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const cheerio = require("cheerio");
-
-// 1) Importar la librería oficial de Hugging Face
 const { HfInference } = require("@huggingface/inference");
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -34,10 +32,11 @@ const index = pinecone.index(PINECONE_INDEX_NAME);
 // INICIALIZAR GOOGLE GENERATIVE AI (GEMINI)
 // ────────────────────────────────────────────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-// Escoge tu modelo, p. ej. "gemini-1.5-flash"
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// 2) Crear instancia de HfInference con tu token
+// ────────────────────────────────────────────────────────────────────────────────
+// INSTANCIA DE HfInference
+// ────────────────────────────────────────────────────────────────────────────────
 const hf = new HfInference(HUGGINGFACE_API_KEY);
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -45,19 +44,18 @@ const hf = new HfInference(HUGGINGFACE_API_KEY);
 // ────────────────────────────────────────────────────────────────────────────────
 async function getEmbedding(text) {
   try {
-    // 3) Llamar a featureExtraction() con tu modelo preferido
-    // Por ejemplo: "intfloat/multilingual-e5-large"
     const result = await hf.featureExtraction({
       model: "intfloat/multilingual-e5-large",
       inputs: text,
     });
-    // Normalmente 'result' será un array de arrays (batch).
-    // Para un único texto, asume que es [ [embedding] ].
-    // A veces ya te devuelve [embedding]. Revisa console.log si dudas.
-    if (!Array.isArray(result) || !Array.isArray(result[0])) {
+
+    // console.log("Respuesta completa de Hugging Face:", result);
+
+    // Verificamos que sea un array (el embedding unidimensional)
+    if (!Array.isArray(result)) {
       throw new Error("La respuesta de Hugging Face no es el embedding esperado.");
     }
-    return result[0]; // Devolvemos el vector
+    return result;
   } catch (error) {
     console.error("Error obteniendo embeddings (Hugging Face):", error);
     throw new Error("Error generando embeddings.");
@@ -98,17 +96,17 @@ app.post("/indexar", async (req, res) => {
     const vector = await getEmbedding(noticia);
 
     // 2) Subir a Pinecone
-    const upsertResponse = await index.upsert({
-      vectors: [
+    const upsertResponse = await index.upsert(
+      [
         {
           id: Date.now().toString(), // ID único
           values: vector,
           metadata: { noticia, copy },
         },
-      ],
-    });
+      ]
+    );
 
-    console.log("Indexación exitosa:", upsertResponse);
+    // console.log("Indexación exitosa:", upsertResponse);
     return res.json({ message: "Noticia indexada exitosamente." });
   } catch (error) {
     console.error("Error al indexar la noticia:", error);
@@ -133,7 +131,6 @@ app.post("/generar_copy", async (req, res) => {
     const vector = await getEmbedding(noticia);
 
     // 3️⃣ Buscar noticias similares en Pinecone
-    //    Ajusta namespace("") o quita la propiedad si usas el namespace por defecto
     const resultados = await index.namespace("").query({
       topK: 2,
       vector,
@@ -146,20 +143,17 @@ app.post("/generar_copy", async (req, res) => {
       copy: match.metadata?.copy || "",
     })) || [];
 
-    // Si Pinecone no encuentra nada, 'similares' estará vacío
     let referenciaTexto = "";
     if (similares.length > 0) {
       referenciaTexto = `Aquí hay algunos ejemplos de noticias anteriores con sus copies:\n` +
         similares
           .map(
-            (s, i) =>
-              `Ejemplo ${i + 1}:\n   Título: "${s.noticia}"\n   Copy: "${s.copy}"`
+            (s, i) => `Ejemplo ${i + 1}:\n   Título: "${s.noticia}"\n   Copy: "${s.copy}"`
           )
           .join("\n");
     }
 
     // 5️⃣ Crear los prompts para cada copy
-    //    Ajusta las instrucciones según la longitud y el tono que quieras.
     const fbPrompt = `
       Genera un título llamativo para esta noticia. 
       Debe ser informativo, breve (máx. 10 palabras) y con 1-2 emojis si es adecuado.
@@ -189,9 +183,8 @@ app.post("/generar_copy", async (req, res) => {
     ]);
 
     // 7️⃣ Obtener el texto generado (Gemini retorna un objeto con candidates)
-    const extractText = (response) => {
-      return response.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
-    };
+    const extractText = (response) =>
+      response.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
 
     const fbText = extractText(fbCopy);
     const twitterText = extractText(twitterCopy);
@@ -209,8 +202,45 @@ app.post("/generar_copy", async (req, res) => {
   }
 });
 
+// NUEVO ENDPOINT: BÚSQUEDA DE LA NOTICIA/COPY MÁS SIMILAR
+app.post("/buscar_similar", async (req, res) => {
+  try {
+    const { texto } = req.body;
+    if (!texto) {
+      return res.status(400).json({ error: "Se requiere un campo 'texto' para buscar similitud." });
+    }
+
+    // 1) Generar embedding de la consulta
+    const vector = await getEmbedding(texto);
+
+    // 2) Consultar Pinecone
+    const results = await index.namespace("").query({
+      topK: 1,              // solo queremos el más parecido
+      vector,               // embedding de la consulta
+      includeMetadata: true // para obtener la noticia y el copy del match
+    });
+
+    // 3) Verificar si hay resultados
+    if (!results.matches || results.matches.length === 0) {
+      return res.status(404).json({ error: "No se encontraron coincidencias similares." });
+    }
+
+    // 4) Tomar el primer resultado (más parecido)
+    const bestMatch = results.matches[0];
+    // Podrías devolver score, ID y metadata
+    return res.json({
+      id: bestMatch.id,
+      score: bestMatch.score,         // similitud o distancia, depende de la configuración de tu índice
+      metadata: bestMatch.metadata    // { noticia, copy }
+    });
+  } catch (error) {
+    console.error("Error al buscar similar:", error);
+    res.status(500).json({ error: "Hubo un error al buscar la similitud." });
+  }
+});
+
 // ────────────────────────────────────────────────────────────────────────────────
 // INICIAR SERVIDOR
 // ────────────────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🚀 Backend corriendo en http://localhost:${PORT}`));
+app.listen(PORT);
