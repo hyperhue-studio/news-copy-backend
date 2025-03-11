@@ -40,20 +40,15 @@ const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 async function getEmbedding(text) {
   try {
     const url = "https://api-inference.huggingface.co/models/intfloat/multilingual-e5-large";
-
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
-        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify({ inputs: text }),
+      body: JSON.stringify({ inputs: text })
     });
-
     const json = await response.json();
-    // Generalmente la respuesta es [[vector]]
-    // o un array bidimensional, según el modelo.
-    // Aquí asumimos que json[0] es el vector.
     if (!Array.isArray(json) || !Array.isArray(json[0])) {
       throw new Error("Respuesta de Hugging Face no es el embedding esperado.");
     }
@@ -63,6 +58,7 @@ async function getEmbedding(text) {
     throw new Error("Error generando embeddings.");
   }
 }
+
 
 // ────────────────────────────────────────────────────────────────────────────────
 // FUNCIÓN PARA OBTENER TÍTULO DE LA NOTICIA (SCRAPING)
