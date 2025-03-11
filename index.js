@@ -1,10 +1,13 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
+const fetch = require("node-fetch");  // Puedes seguir usando fetch para scraping o cambiarlo a axios
 const { Pinecone } = require("@pinecone-database/pinecone");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const cheerio = require("cheerio");
+
+// 1) Importar la librería oficial de Hugging Face
+const { HfInference } = require("@huggingface/inference");
 
 // ────────────────────────────────────────────────────────────────────────────────
 // CONFIGURACIÓN DEL SERVIDOR
@@ -34,31 +37,32 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 // Escoge tu modelo, p. ej. "gemini-1.5-flash"
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
+// 2) Crear instancia de HfInference con tu token
+const hf = new HfInference(HUGGINGFACE_API_KEY);
+
 // ────────────────────────────────────────────────────────────────────────────────
-// FUNCIÓN PARA OBTENER EMBEDDING DESDE HUGGING FACE INFERENCE
+// FUNCIÓN PARA OBTENER EMBEDDING DESDE Hugging Face Inference API
 // ────────────────────────────────────────────────────────────────────────────────
 async function getEmbedding(text) {
   try {
-    const url = "https://api-inference.huggingface.co/models/intfloat/multilingual-e5-large";
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ inputs: text })
+    // 3) Llamar a featureExtraction() con tu modelo preferido
+    // Por ejemplo: "intfloat/multilingual-e5-large"
+    const result = await hf.featureExtraction({
+      model: "intfloat/multilingual-e5-large",
+      inputs: text,
     });
-    const json = await response.json();
-    if (!Array.isArray(json) || !Array.isArray(json[0])) {
-      throw new Error("Respuesta de Hugging Face no es el embedding esperado.");
+    // Normalmente 'result' será un array de arrays (batch).
+    // Para un único texto, asume que es [ [embedding] ].
+    // A veces ya te devuelve [embedding]. Revisa console.log si dudas.
+    if (!Array.isArray(result) || !Array.isArray(result[0])) {
+      throw new Error("La respuesta de Hugging Face no es el embedding esperado.");
     }
-    return json[0];
+    return result[0]; // Devolvemos el vector
   } catch (error) {
-    console.error("Error obteniendo embeddings:", error);
+    console.error("Error obteniendo embeddings (Hugging Face):", error);
     throw new Error("Error generando embeddings.");
   }
 }
-
 
 // ────────────────────────────────────────────────────────────────────────────────
 // FUNCIÓN PARA OBTENER TÍTULO DE LA NOTICIA (SCRAPING)
@@ -94,17 +98,17 @@ app.post("/indexar", async (req, res) => {
     const vector = await getEmbedding(noticia);
 
     // 2) Subir a Pinecone
-    const response = await index.upsert({
+    const upsertResponse = await index.upsert({
       vectors: [
         {
-          id: Date.now().toString(), // ID único; podrías usar algo más robusto (UUID)
+          id: Date.now().toString(), // ID único
           values: vector,
           metadata: { noticia, copy },
         },
       ],
     });
 
-    console.log("Indexación exitosa:", response);
+    console.log("Indexación exitosa:", upsertResponse);
     return res.json({ message: "Noticia indexada exitosamente." });
   } catch (error) {
     console.error("Error al indexar la noticia:", error);
