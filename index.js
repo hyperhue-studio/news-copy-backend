@@ -1,42 +1,31 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch"); // Usado para scraping
+const fetch = require("node-fetch");
 const { Pinecone } = require("@pinecone-database/pinecone");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const cheerio = require("cheerio");
 const { HfInference } = require("@huggingface/inference");
 
-// ────────────────────────────────────────────────────────────────────────────────
-// CONFIGURACIÓN DEL SERVIDOR
-// ────────────────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ────────────────────────────────────────────────────────────────────────────────
-// API KEYS Y CONFIGURACIONES
-// ────────────────────────────────────────────────────────────────────────────────
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY;
 const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX_NAME;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
+const BITLY_TOKEN = process.env.BITLY_TOKEN; // Para acortar URLs
 
-// ────────────────────────────────────────────────────────────────────────────────
-// INICIALIZAR PINECONE
-// ────────────────────────────────────────────────────────────────────────────────
+// Inicializar Pinecone
 const pinecone = new Pinecone({ apiKey: PINECONE_API_KEY });
 const index = pinecone.index(PINECONE_INDEX_NAME);
 
-// ────────────────────────────────────────────────────────────────────────────────
-// INICIALIZAR GOOGLE GENERATIVE AI (GEMINI)
-// ────────────────────────────────────────────────────────────────────────────────
+// Inicializar Google Generative AI
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// ────────────────────────────────────────────────────────────────────────────────
-// INSTANCIA DE HfInference
-// ────────────────────────────────────────────────────────────────────────────────
+// HfInference para embeddings
 const hf = new HfInference(HUGGINGFACE_API_KEY);
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -62,23 +51,56 @@ async function getEmbedding(text) {
 // ────────────────────────────────────────────────────────────────────────────────
 // FUNCIÓN PARA OBTENER TÍTULO DE LA NOTICIA (SCRAPING)
 // ────────────────────────────────────────────────────────────────────────────────
-async function getTitleFromURL(url) {
+async function getTitleAndDescription(url) {
+  // Scrape para obtener og:title y og:description
   try {
     const response = await fetch(url);
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    // Buscamos un meta og:title o, en su defecto, la etiqueta <title>
-    const title = $('meta[property="og:title"]').attr("content") || $("title").text();
-    if (!title) throw new Error("No se encontró título");
+    const title = $('meta[property="og:title"]').attr("content");
+    const description = $('meta[property="og:description"]').attr("content");
 
-    return title.trim();
+    if (!title || !description) {
+      throw new Error("No se encontraron los meta tags adecuados (og:title, og:description).");
+    }
+
+    return { title: title.trim(), description: description.trim() };
   } catch (error) {
-    console.error("Error obteniendo título:", error);
-    throw new Error("No se pudo extraer el título de la noticia.");
+    console.error("Error obteniendo título/descripción:", error);
+    throw new Error("No se pudo extraer los meta tags de la noticia.");
   }
 }
 
+// Función para acortar la URL usando Bitly (similar a tu versión anterior)
+async function shortenUrl(url) {
+  try {
+    const longUrlWithUtm = `${url}?utm_source=whatsapp&utm_medium=social&utm_campaign=canal`;
+    console.log("URL antes de acortar:", longUrlWithUtm);
+
+    const resp = await fetch("https://api-ssl.bitly.com/v4/shorten", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${BITLY_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ long_url: longUrlWithUtm }),
+    });
+
+    if (!resp.ok) {
+      const errorData = await resp.json();
+      console.error("Error en la solicitud de acortamiento:", errorData);
+      throw new Error("Error al acortar la URL.");
+    }
+
+    const data = await resp.json();
+    console.log("URL acortada:", data.link);
+    return data.link;
+  } catch (error) {
+    console.error("Error al acortar la URL:", error);
+    throw new Error("Hubo un error al acortar la URL.");
+  }
+}
 // ────────────────────────────────────────────────────────────────────────────────
 // ENDPOINT: INDEXAR (GUARDAR) NOTICIA + COPY EN PINECONE (COPY DE FACEBOOK)
 // ────────────────────────────────────────────────────────────────────────────────
@@ -111,105 +133,100 @@ app.post("/indexar", async (req, res) => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────────
-// NUEVO ENDPOINT: GENERAR COPY USANDO RAG
+// ENDPOINT: GENERAR COPIES (VERSIÓN RAG PARA FB, LÓGICA ORIGINAL PARA TW/WPP)
 // ────────────────────────────────────────────────────────────────────────────────
-app.post("/generar_copy_rag", async (req, res) => {
+app.post("/generate-copies", async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) {
       return res.status(400).json({ error: "La URL es obligatoria." });
     }
 
-    // 1) Scraping: obtener título de la noticia
-    const titulo = await getTitleFromURL(url);
+    // 1. Obtener title y description via scraping
+    const { title, description } = await getTitleAndDescription(url);
 
-    // 2) Generar embedding del título
-    const vector = await getEmbedding(titulo);
+    // 2. Preparar combinedText para Twitter/Wpp
+    const combinedText = `${title}. ${description}`;
 
-    // 3) Buscar topK=3 en Pinecone para obtener los 3 copies de FB más similares
+    // 3. RAG SOLO PARA FACEBOOK
+    // 3.1 Generar embedding SOLO DEL TITULO
+    const fbVector = await getEmbedding(title);
+
+    // 3.2 Buscar topK=3 en Pinecone
     const results = await index.namespace("").query({
       topK: 3,
-      vector,
+      vector: fbVector,
       includeMetadata: true,
     });
 
     const similares = results.matches?.map((match) => ({
-      noticia: match.metadata?.noticia || "",
-      copy: match.metadata?.copy || "", // copy de Facebook
+      copy: match.metadata?.copy || "",
     })) || [];
 
-    // 4) Construir references para Facebook
+    // 3.3 Construir references (SOLO los copies)
     let referencesFb = "";
     if (similares.length > 0) {
-      referencesFb = `Aquí hay algunos copies de Facebook anteriores (3 más similares):\n`;
-      referencesFb += similares
-        .map((s, i) => `Ejemplo ${i + 1}: \n  Título: "${s.noticia}"\n  FB Copy: "${s.copy}"`)
-        .join("\n\n");
+      referencesFb = `Aquí hay algunos examples de Facebook copies anteriores:\n\n` +
+        similares
+          .map(
+            (s, i) => `Ejemplo ${i + 1}: "${s.copy}"`
+          )
+          .join("\n\n");
     }
 
-    // 5) Prompt para Facebook con RAG
+    // 4. Generar FB copy con RAG
     const fbPrompt = `
-      Basándote en estos copies de Facebook (ejemplos), crea un copy de Facebook
-      para la siguiente noticia. El copy debe ser breve, informativo y puedes usar
-      1-2 emojis si es adecuado. Máximo 2 líneas.
+      Basándote en estos copies de Facebook (ejemplos), crea un copy breve e informativo.
+      Puedes usar 1-2 emojis si es apropiado. Máx. 2 líneas.
 
       ${referencesFb}
 
-      Título de la noticia actual: "${titulo}"
+      Título actual de la noticia: "${title}"
     `;
+    // Llamada a Gemini
+    const fbResp = await model.generateContent([fbPrompt]);
+    const facebookCopyRaw = fbResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    const facebookCopy = facebookCopyRaw.trim();
 
-    // 6) Prompt para Twitter y Wpp (sin RAG, puro prompt)
+    // 5. Generar TWITTER copy (LÓGICA ORIGINAL)
+    // Prompt original
     const twitterPrompt = `
-      Genera un tweet breve (máx. 10 palabras) para esta noticia, 
-      con tono directo y un emoji al final.
-      Noticia: "${titulo}"
+      Genera un título sobre la siguiente noticia, debe ser informativo y con un tono directo,
+      un solo emoji al final. Conciso y al grano, idealmente no más de 10 palabras ya que es para un tweet.
+      No respondas nada más que el título: "${combinedText}"
     `;
+    const twResp = await model.generateContent([twitterPrompt]);
+    let twitterText = twResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    twitterText = twitterText.trim();
+    // Añadimos el enlace original en un renglón aparte
+    const twitterCopyFinal = `${twitterText}\n${url}`;
 
+    // 6. Generar WPP copy (LÓGICA ORIGINAL)
     const wppPrompt = `
-      Genera un mensaje corto para WhatsApp con TÍTULO (máx. 10 palabras) y 
-      un párrafo breve. Usa 1-2 emojis si es apropiado.
-      Noticia: "${titulo}"
+      Genera un copy corto para la siguiente noticia. 
+      Debe tener un título muy corto (no más de 10 palabras) seguido de 1 párrafo de máx. 2 renglones.
+      Debe ser informativo y con un tono directo, pero también carismático y llamativo
+      (en caso de que la noticia no sea sensible). Incluye 1-2 emojis respetuosos.
+      No respondas nada más que el copy: "${combinedText}"
     `;
+    const wppResp = await model.generateContent([wppPrompt]);
+    let wppText = wppResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    wppText = wppText.trim();
 
-    // 7) Llamamos a Gemini
-    const [fbResp, twResp, wppResp] = await Promise.all([
-      model.generateContent([fbPrompt]),
-      model.generateContent([twitterPrompt]),
-      model.generateContent([wppPrompt]),
-    ]);
+    // 6.1 Acortar la URL para WPP
+    const shortUrl = await shortenUrl(url);
+    // 6.2 Concatenar la URL acortada al final
+    const wppCopyFinal = `${wppText} Lee más aquí👉 ${shortUrl}`;
 
-    const extractText = (response) =>
-      response.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
-
-    const facebookCopy = extractText(fbResp).trim();
-    const twitterCopy = extractText(twResp).trim();
-    const wppCopy = extractText(wppResp).trim();
-
+    // 7. Responder con los tres copies
     return res.json({
       facebook: facebookCopy,
-      twitter: twitterCopy,
-      wpp: wppCopy
+      twitter: twitterCopyFinal,
+      wpp: wppCopyFinal,
     });
   } catch (error) {
-    console.error("Error al generar copy (RAG):", error);
-    res.status(500).json({ error: "Hubo un error al generar el copy con RAG." });
-  }
-});
-
-// ────────────────────────────────────────────────────────────────────────────────
-// ENDPOINT VIEJO (Opcional): /generar_copy - si ya no lo usas, puedes borrarlo
-// ────────────────────────────────────────────────────────────────────────────────
-app.post("/generar_copy", async (req, res) => {
-  try {
-    const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: "La URL es obligatoria." });
-    }
-    // ... Lógica anterior ...
-    return res.json({ /* ... facebook, twitter, wpp ... */ });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Error" });
+    console.error("Error al generar los copys:", error);
+    return res.status(500).json({ error: "Hubo un error al generar los copys." });
   }
 });
 
