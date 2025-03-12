@@ -250,10 +250,11 @@ app.post("/generate-copies", async (req, res) => {
     console.log("[generate-copies] wppCopy final:", wppCopyFinal);
 
     return res.json({
-      facebook: facebookCopy,
-      twitter: twitterCopyFinal,
-      wpp: wppCopyFinal,
-    });
+  facebook: facebookCopy,
+  twitter: twitterCopyFinal,
+  wpp: wppCopyFinal,
+  foundCopies: similares,  // <= agregas esta propiedad
+});
   } catch (error) {
     console.error("[generate-copies] Error al generar los copys:", error);
     return res.status(500).json({ error: "Hubo un error al generar los copys." });
