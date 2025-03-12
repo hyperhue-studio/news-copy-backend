@@ -190,6 +190,7 @@ app.post("/generate-copies", async (req, res) => {
     (pueden ir al principio, en medio, al final, o mixto, pero que sean respetuosos si el tema es sensible).
     No omitas datos importantes. Toma en cuenta para contexto que la noticia es de El Heraldo de Chihuahua, por lo que puede que sea o no noticia local.
     No respondas nada más que el copy que generarás.
+    Estas son las 3 referencias de copies, si bien puede que sean o no sean del mismo tema, tómalos como referencia de redacción y personalidad para tratar el que generarás a continuación.
     
     ${referencesFb}
     
