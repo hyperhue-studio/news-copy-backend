@@ -195,7 +195,8 @@ app.post("/generate-copies", async (req, res) => {
 
     const fbResp = await model.generateContent([fbPrompt]);
     console.log("[generate-copies] fbResp completo:", JSON.stringify(fbResp, null, 2));
-    const facebookCopyRaw = fbResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    const facebookCopyRaw = fbResp.response?.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+
     console.log("[generate-copies] facebookCopyRaw:", facebookCopyRaw);
     const facebookCopy = facebookCopyRaw.trim();
 
@@ -210,7 +211,8 @@ app.post("/generate-copies", async (req, res) => {
 
     const twResp = await model.generateContent([twitterPrompt]);
     console.log("[generate-copies] twResp completo:", JSON.stringify(twResp, null, 2));
-    let twitterText = twResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    let twitterText = twResp.response?.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+
     console.log("[generate-copies] twitterText raw:", twitterText);
     twitterText = twitterText.trim();
     const twitterCopyFinal = `${twitterText}\n${url}`;
@@ -228,7 +230,9 @@ app.post("/generate-copies", async (req, res) => {
 
     const wppResp = await model.generateContent([wppPrompt]);
     console.log("[generate-copies] wppResp completo:", JSON.stringify(wppResp, null, 2));
-    let wppText = wppResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    let wppText =
+      wppResp.response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Texto no disponible";
     console.log("[generate-copies] wppText raw:", wppText);
     wppText = wppText.trim();
 
