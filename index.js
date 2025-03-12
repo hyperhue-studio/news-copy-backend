@@ -138,41 +138,49 @@ app.post("/indexar", async (req, res) => {
 app.post("/generate-copies", async (req, res) => {
   try {
     const { url } = req.body;
+    console.log("[generate-copies] URL recibida:", url);
+
     if (!url) {
       return res.status(400).json({ error: "La URL es obligatoria." });
     }
 
-    // 1. Obtener title y description via scraping
+    // 1. Obtener title + description via scraping
     const { title, description } = await getTitleAndDescription(url);
+    console.log("[generate-copies] Título final:", title);
+    console.log("[generate-copies] Descripción final:", description);
 
     // 2. Preparar combinedText para Twitter/Wpp
     const combinedText = `${title}. ${description}`;
+    console.log("[generate-copies] combinedText:", combinedText);
 
     // 3. RAG SOLO PARA FACEBOOK
-    // 3.1 Generar embedding SOLO DEL TITULO
+    console.log("[generate-copies] Generando embedding SOLO del título para RAG FB...");
     const fbVector = await getEmbedding(title);
 
-    // 3.2 Buscar topK=3 en Pinecone
+    console.log("[generate-copies] Buscando topK=3 en Pinecone...");
     const results = await index.namespace("").query({
       topK: 3,
       vector: fbVector,
       includeMetadata: true,
     });
 
+    console.log("[generate-copies] Pinecone results:", JSON.stringify(results, null, 2));
     const similares = results.matches?.map((match) => ({
       copy: match.metadata?.copy || "",
     })) || [];
+    console.log("[generate-copies] Copias similares FB:", similares);
 
     // 3.3 Construir references (SOLO los copies)
     let referencesFb = "";
     if (similares.length > 0) {
-      referencesFb = `Aquí hay algunos examples de Facebook copies anteriores:\n\n` +
+      referencesFb = `Aquí hay algunos ejemplos de Facebook copies anteriores:\n\n` +
         similares
           .map(
             (s, i) => `Ejemplo ${i + 1}: "${s.copy}"`
           )
           .join("\n\n");
     }
+    console.log("[generate-copies] referencesFb:\n", referencesFb);
 
     // 4. Generar FB copy con RAG
     const fbPrompt = `
@@ -183,25 +191,32 @@ app.post("/generate-copies", async (req, res) => {
 
       Título actual de la noticia: "${title}"
     `;
-    // Llamada a Gemini
+    console.log("[generate-copies] FB Prompt:\n", fbPrompt);
+
     const fbResp = await model.generateContent([fbPrompt]);
+    console.log("[generate-copies] fbResp completo:", JSON.stringify(fbResp, null, 2));
     const facebookCopyRaw = fbResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    console.log("[generate-copies] facebookCopyRaw:", facebookCopyRaw);
     const facebookCopy = facebookCopyRaw.trim();
 
     // 5. Generar TWITTER copy (LÓGICA ORIGINAL)
-    // Prompt original
+    console.log("[generate-copies] Generando TWITTER copy...");
     const twitterPrompt = `
       Genera un título sobre la siguiente noticia, debe ser informativo y con un tono directo,
       un solo emoji al final. Conciso y al grano, idealmente no más de 10 palabras ya que es para un tweet.
       No respondas nada más que el título: "${combinedText}"
     `;
+    console.log("[generate-copies] twitterPrompt:\n", twitterPrompt);
+
     const twResp = await model.generateContent([twitterPrompt]);
+    console.log("[generate-copies] twResp completo:", JSON.stringify(twResp, null, 2));
     let twitterText = twResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    console.log("[generate-copies] twitterText raw:", twitterText);
     twitterText = twitterText.trim();
-    // Añadimos el enlace original en un renglón aparte
     const twitterCopyFinal = `${twitterText}\n${url}`;
 
     // 6. Generar WPP copy (LÓGICA ORIGINAL)
+    console.log("[generate-copies] Generando WPP copy...");
     const wppPrompt = `
       Genera un copy corto para la siguiente noticia. 
       Debe tener un título muy corto (no más de 10 palabras) seguido de 1 párrafo de máx. 2 renglones.
@@ -209,23 +224,34 @@ app.post("/generate-copies", async (req, res) => {
       (en caso de que la noticia no sea sensible). Incluye 1-2 emojis respetuosos.
       No respondas nada más que el copy: "${combinedText}"
     `;
+    console.log("[generate-copies] wppPrompt:\n", wppPrompt);
+
     const wppResp = await model.generateContent([wppPrompt]);
+    console.log("[generate-copies] wppResp completo:", JSON.stringify(wppResp, null, 2));
     let wppText = wppResp.candidates?.[0]?.content?.parts?.[0]?.text || "Texto no disponible";
+    console.log("[generate-copies] wppText raw:", wppText);
     wppText = wppText.trim();
 
     // 6.1 Acortar la URL para WPP
+    console.log("[generate-copies] Acortando URL para WPP...");
     const shortUrl = await shortenUrl(url);
+    console.log("[generate-copies] shortUrl:", shortUrl);
+
     // 6.2 Concatenar la URL acortada al final
     const wppCopyFinal = `${wppText} Lee más aquí👉 ${shortUrl}`;
 
     // 7. Responder con los tres copies
+    console.log("[generate-copies] facebookCopy final:", facebookCopy);
+    console.log("[generate-copies] twitterCopy final:", twitterCopyFinal);
+    console.log("[generate-copies] wppCopy final:", wppCopyFinal);
+
     return res.json({
       facebook: facebookCopy,
       twitter: twitterCopyFinal,
       wpp: wppCopyFinal,
     });
   } catch (error) {
-    console.error("Error al generar los copys:", error);
+    console.error("[generate-copies] Error al generar los copys:", error);
     return res.status(500).json({ error: "Hubo un error al generar los copys." });
   }
 });
