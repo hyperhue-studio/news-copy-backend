@@ -184,12 +184,16 @@ app.post("/generate-copies", async (req, res) => {
 
     // 4. Generar FB copy con RAG
     const fbPrompt = `
-      Basándote en estos copies de Facebook (ejemplos), crea un copy breve e informativo.
-      Puedes usar 1-2 emojis si es apropiado. Máx. 2 líneas.
-
-      ${referencesFb}
-
-      Título actual de la noticia: "${title}"
+    Basándote en estos copies de Facebook (ejemplos), genera un título sobre la noticia que mencionaré al final.
+    Debe ser informativo y con un tono directo, pero también carismático y llamativo.
+    Breve y al grano, idealmente no más de 10 palabras. Incluye de 1 a 2 emojis
+    (pueden ir al principio, en medio, al final, o mixto, pero que sean respetuosos si el tema es sensible).
+    No omitas datos importantes. Toma en cuenta para contexto que la noticia es de El Heraldo de Chihuahua, por lo que puede que sea o no noticia local.
+    No respondas nada más que el copy que generarás.
+    
+    ${referencesFb}
+    
+    Este es el título de la noticia actual para generarle el copy: "${title}"
     `;
     console.log("[generate-copies] FB Prompt:\n", fbPrompt);
 
@@ -203,9 +207,10 @@ app.post("/generate-copies", async (req, res) => {
     // 5. Generar TWITTER copy (LÓGICA ORIGINAL)
     console.log("[generate-copies] Generando TWITTER copy...");
     const twitterPrompt = `
-      Genera un título sobre la siguiente noticia, debe ser informativo y con un tono directo,
-      un solo emoji al final. Conciso y al grano, idealmente no más de 10 palabras ya que es para un tweet.
-      No respondas nada más que el título: "${combinedText}"
+    Genera un copy sobre la siguiente noticia, debe ser informativo y con un tono directo,
+    un solo emoji al final. Conciso y al grano, idealmente no más de 10 palabras ya que es para un tweet.
+    No omitas datos importantes. Toma en cuenta para contexto que la noticia es de El Heraldo de Chihuahua, por lo que puede que sea o no noticia local.
+    No respondas nada más que el copy: "${combinedText}"
     `;
     console.log("[generate-copies] twitterPrompt:\n", twitterPrompt);
 
@@ -220,11 +225,13 @@ app.post("/generate-copies", async (req, res) => {
     // 6. Generar WPP copy (LÓGICA ORIGINAL)
     console.log("[generate-copies] Generando WPP copy...");
     const wppPrompt = `
-      Genera un copy corto para la siguiente noticia. 
-      Debe tener un título muy corto (no más de 10 palabras) seguido de 1 párrafo de máx. 2 renglones.
-      Debe ser informativo y con un tono directo, pero también carismático y llamativo
-      (en caso de que la noticia no sea sensible). Incluye 1-2 emojis respetuosos.
-      No respondas nada más que el copy: "${combinedText}"
+    Genera un copy corto para la siguiente noticia. 
+    Debe tener un título muy corto (no más de 10 palabras) seguido de un párrafo de máximo 2 renglones 
+    describiendo un poco la noticia. Debe ser informativo y con un tono directo, 
+    pero también carismático y llamativo (en caso de que la noticia no sea sensible).
+    No omitas datos importantes. Toma en cuenta para contexto que la noticia es de El Heraldo de Chihuahua, por lo que puede que sea o no noticia local.
+    Incluye de 1 a 2 emojis (para título y párrafo, pero que sean respetuosos si es tema sensible). 
+    No respondas nada más que el copy: "${combinedText}"
     `;
     console.log("[generate-copies] wppPrompt:\n", wppPrompt);
 
